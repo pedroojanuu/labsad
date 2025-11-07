@@ -1,0 +1,11 @@
+services:
+  nats-a:
+    image: nats:latest
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+  nats-b:
+    image: nats:latest
+    command: ["-js"]
+    ports:
+      - "5222:4222"
