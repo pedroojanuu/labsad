@@ -1,11 +1,20 @@
 services:
+  nats-hub:
+    image: nats:latest
+    command: ["-js"]
+    ports:
+      - "3222:4222" # quitar ??????????????
   nats-a:
     image: nats:latest
-    command: ["-js"]
+    command: ["-js", "-leaf", "nats://nats-hub:7422"]
     ports:
       - "4222:4222"
+    depends_on:
+      - nats-hub
   nats-b:
     image: nats:latest
-    command: ["-js"]
+    command: ["-js", "-leaf", "nats://nats-hub:7422"]
     ports:
       - "5222:4222"
+    depends_on:
+      - nats-hub
