@@ -1,0 +1,3 @@
+Para implementar el tópico de replicación, se utiliza un tercer servidor (nats-hub) y nats-a y nats-b actúan como sus hojas (en cuanto al tópico de replicación, manteniendo sus propios almacenamientos KV locales).
+
+9. Actualizaciones perdidas y recuperación: se elige la estrategia 9.1 (convertir rep.kv.ops en un stream persistente)

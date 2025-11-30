@@ -7,12 +7,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+
 	// "time"
 
 	"github.com/nats-io/nats.go"
 )
 
-// Estructura de la operación CRDT [cite: 87-95]
+// Estructura de la operación CRDT
 type CRDTOp struct {
 	Op     string `json:"op"` // "put" o "del"
 	Bucket string `json:"bucket"`
@@ -23,63 +24,62 @@ type CRDTOp struct {
 }
 
 func main() {
-	// Parámetros de línea de comandos [cite: 73-77]
+	// Parámetros de línea de comandos
 	natsURL := flag.String("nats-url", "nats://localhost:4222", "URL de NATS")
-	bucketName := flag.String("bucket", "config", "Nombre del bucket KV")
 	nodeID := flag.String("node-id", "site-a", "ID único de este nodo")
-	repSubject := flag.String("rep-subj", "rep.kv.ops", "Subject de replicación")		// CAMBIAR ??
 	flag.Parse()
 
-	// 1. Conexión a NATS y JetStream
+	// Parámetros estáticos
+	bucketName := "config"     // Bucket del KV local
+	repSubject := "rep.kv.ops" // Tópico de replicación
+
+	// Conexión a NATS y JetStream
 	nc, err := nats.Connect(*natsURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 	js, _ := nc.JetStream()
 
-	streamName := "KV_REPLICATION"
-	js.AddStream(&nats.StreamConfig{
-		Name:     streamName,
-		Subjects: []string{*repSubject},
-		Replicas: 1,
-	})
-
 	// Obtener el KV store local
-	kv, err := js.KeyValue(*bucketName)
+	kv, err := js.KeyValue(bucketName)
 	if err != nil {
-		log.Fatalf("Error accediendo al KV '%s': %v", *bucketName, err)
+		log.Fatalf("Error accediendo al KV '%s': %v", bucketName, err)
 	}
-	fmt.Printf("Agente iniciado en %s [%s] conectado a %s\n", *nodeID, *bucketName, *natsURL)
+	fmt.Printf("Agente iniciado en %s [%s] conectado a %s\n", *nodeID, bucketName, *natsURL)
 
 	// =========================================================================
-	// PARTE 1: RECIBIR OPERACIONES REMOTAS (SUSCRIPCIÓN) [cite: 98]
+	// PARTE 1: RECIBIR OPERACIONES REMOTAS (SUSCRIPCIÓN)
+	// Cada nodo se suscribe al repSubject. Dado que cada servidor NATS A/B
+	// actúa como hoja del hub, el repSubject en realidad está en el hub, pero
+	// desde el punto de vista de cada agente, basta con interactuar con su
+	// servidor NATS
 	// =========================================================================
-	nc.Subscribe(*repSubject, func(m *nats.Msg) {
+	_, err = js.Subscribe(repSubject, func(m *nats.Msg) {
 		var op CRDTOp
 		if err := json.Unmarshal(m.Data, &op); err != nil {
 			return
 		}
 
-		// Ignorar eco local (si el mensaje vino de mí mismo) [cite: 103]
+		// Ignorar eco local (si el mensaje vino de mí mismo)
 		if op.NodeID == *nodeID {
 			return
 		}
 
 		fmt.Printf("[%s] Recibida OP remota de %s: %s (TS: %d)\n", *nodeID, op.NodeID, op.Key, op.Ts)
 
-		// Lógica LWW (Last-Writer-Wins) y Resolución de Conflictos [cite: 40-44]
+		// Lógica LWW (Last-Writer-Wins) y Resolución de Conflictos
 		// Obtenemos el valor actual local para comparar timestamps
 		entry, err := kv.Get(op.Key)
-		
+
 		doUpdate := false
 		if err == nats.ErrKeyNotFound {
 			// Si no existe localmente, aplicamos el remoto directamente -no hay conflicto
 			doUpdate = true
 		} else if err == nil {
-			// Si existe -hay conflicto-, aplicamos la regla del laboratorio:
+			// Si existe -hay conflicto-, aplicamos la regla:
 			// Gana si: (ts_remoto > ts_local) OR (ts_remoto == ts_local AND node_id_remoto > node_id_local)
 			localTs := entry.Created().Unix() // Usamos Created como aproximación del TS lógico
-			
+
 			if op.Ts > localTs || (op.Ts == localTs && op.NodeID > *nodeID) {
 				doUpdate = true
 			}
@@ -87,21 +87,26 @@ func main() {
 
 		if doUpdate {
 			log.Printf("--> APLICANDO CAMBIO REMOTO (Gana remoto): %s = %s", op.Key, string(op.Value))
-			// Nota: Al escribir aquí, saltará el watcher local. 
-			// En un sistema real necesitamos evitar bucles infinitos complejos, 
-			// pero el check de timestamps suele frenarlo eventualmente.
-			if op.Op == "put" {
-				kv.Put(op.Key, op.Value)
-			} else if op.Op == "del" {
-				kv.Delete(op.Key)
+			
+			switch op.Op {
+				case "put":
+					kv.Put(op.Key, op.Value)
+				case "del":
+					kv.Delete(op.Key)
 			}
 		} else {
 			log.Printf("--- IGNORANDO CAMBIO REMOTO (Gana local o es antiguo)")
 		}
-	})
+
+		m.Ack() // Confirmar recepción de mensaje después de procesarla
+	}, nats.Durable(*nodeID), nats.ManualAck())
+
+	if err != nil {
+		log.Fatalf("Erro al suscribirse al tópico de replicación: %v", err)
+	}
 
 	// =========================================================================
-	// PARTE 2: VIGILAR CAMBIOS LOCALES (WATCH) [cite: 79]
+	// PARTE 2: VIGILAR CAMBIOS LOCALES (WATCH)
 	// =========================================================================
 	watcher, _ := kv.WatchAll()
 	go func() {
@@ -110,9 +115,9 @@ func main() {
 				continue
 			}
 
-			// Crear operación CRDT [cite: 87]
+			// Crear operación CRDT
 			op := CRDTOp{
-				Bucket: *bucketName,
+				Bucket: bucketName,
 				Key:    update.Key(),
 				Ts:     update.Created().Unix(), // Usamos el tiempo de creación del registro
 				NodeID: *nodeID,
@@ -125,12 +130,12 @@ func main() {
 				op.Op = "del"
 			}
 
-			// Serializar y publicar en rep.kv.ops [cite: 96]
+			// Serializar y publicar en rep.kv.ops
 			data, _ := json.Marshal(op)
-			nc.Publish(*repSubject, data)
-			
+			nc.Publish(repSubject, data)
+
 			// Solo imprimir logs para depuración visual
-			fmt.Printf(">> Cambio Local detectado: %s. Publicado a %s\n", op.Key, *repSubject)
+			fmt.Printf(">> Cambio Local detectado: %s. Publicado a %s\n", op.Key, repSubject)
 		}
 	}()
 
