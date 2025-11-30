@@ -1,14 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-
-	// "time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -33,28 +32,31 @@ func main() {
 	bucketName := "config"     // Bucket del KV local
 	repSubject := "rep.kv.ops" // Tópico de replicación
 
-	// Conexión a NATS y JetStream
+	// Conexión a NATS
 	nc, err := nats.Connect(*natsURL)
 	if err != nil {
 		log.Fatal(err)
 	}
-	js, _ := nc.JetStream()
+
+	// Conexión al JetStream local (para KV storage)
+	jsLocal, _ := nc.JetStream()
+	fmt.Printf("[%s] Conectado al JetStream local en %s\n", *nodeID, *natsURL)
+
+	// Conexión al JetStream del hub, del que cada nodo es una hoja (para subject de replicación)
+	jsHub, _ := nc.JetStream(nats.Domain("hub"))
+	fmt.Printf("[%s] Conectado al JetStream del hub para replicación\n", *nodeID)
 
 	// Obtener el KV store local
-	kv, err := js.KeyValue(bucketName)
+	kv, err := jsLocal.KeyValue(bucketName)
 	if err != nil {
-		log.Fatalf("Error accediendo al KV '%s': %v", bucketName, err)
+		log.Fatalf("[%s] Error accediendo al KV '%s': %v", *nodeID, bucketName, err)
 	}
-	fmt.Printf("Agente iniciado en %s [%s] conectado a %s\n", *nodeID, bucketName, *natsURL)
+	fmt.Printf("[%s] Obtuvo KV local %s\n", *nodeID, bucketName)
 
 	// =========================================================================
 	// PARTE 1: RECIBIR OPERACIONES REMOTAS (SUSCRIPCIÓN)
-	// Cada nodo se suscribe al repSubject. Dado que cada servidor NATS A/B
-	// actúa como hoja del hub, el repSubject en realidad está en el hub, pero
-	// desde el punto de vista de cada agente, basta con interactuar con su
-	// servidor NATS
 	// =========================================================================
-	_, err = js.Subscribe(repSubject, func(m *nats.Msg) {
+	_, err = jsHub.Subscribe(repSubject, func(m *nats.Msg) {
 		var op CRDTOp
 		if err := json.Unmarshal(m.Data, &op); err != nil {
 			return
@@ -62,47 +64,65 @@ func main() {
 
 		// Ignorar eco local (si el mensaje vino de mí mismo)
 		if op.NodeID == *nodeID {
+			m.Ack()
 			return
 		}
 
-		fmt.Printf("[%s] Recibida OP remota de %s: %s (TS: %d)\n", *nodeID, op.NodeID, op.Key, op.Ts)
+		fmt.Printf("[%s] Recibida OP remota (%s) de %s: %s (TS: %d)\n", *nodeID, op.Op, op.NodeID, op.Key, op.Ts)
 
 		// Lógica LWW (Last-Writer-Wins) y Resolución de Conflictos
-		// Obtenemos el valor actual local para comparar timestamps
+		// Obtenemos el valor actual local para comparar valores y timestamps
 		entry, err := kv.Get(op.Key)
 
 		doUpdate := false
-		if err == nats.ErrKeyNotFound {
-			// Si no existe localmente, aplicamos el remoto directamente -no hay conflicto
-			doUpdate = true
-		} else if err == nil {
-			// Si existe -hay conflicto-, aplicamos la regla:
-			// Gana si: (ts_remoto > ts_local) OR (ts_remoto == ts_local AND node_id_remoto > node_id_local)
-			localTs := entry.Created().Unix() // Usamos Created como aproximación del TS lógico
+		switch err {
+			case nats.ErrKeyNotFound:
+				if op.Op != "del" {
+					// Si no existe localmente y la operación no es DELETE, aplicamos el remoto directamente - no hay conflicto
+					doUpdate = true
+				} else {
+					log.Printf("[%s]	IGNORANDO (Operación DELETE sobre valor que ya no existe en KV local)", *nodeID)
+				}
+			case nil:
+				// Si existe, verificamos si es el mismo valor para romper bucles de replicación
+				// Si el valor binario es igual, no vale la pena verificar timestamps
+				if bytes.Equal(entry.Value(), op.Value) {
+					log.Printf("[%s]	IGNORANDO (Valor igual): %s", *nodeID, op.Key)
+					// doUpdate se mantiene falso, así que el código caerá en el "else" final y hará Ack.
+				} else {
+					// Si el valor es diferente, aplicamos LWW:
+					// Gana si: (ts_remoto > ts_local) OR (ts_remoto == ts_local AND node_id_remoto > node_id_local)
+					localTs := entry.Created().Unix()
 
-			if op.Ts > localTs || (op.Ts == localTs && op.NodeID > *nodeID) {
-				doUpdate = true
-			}
+					if op.Ts > localTs || (op.Ts == localTs && op.NodeID > *nodeID) {
+						doUpdate = true
+					} else {
+						log.Printf("[%s]	IGNORANDO (Gana local)", *nodeID)
+					}
+				}
+			default:
+				// Error inesperado leyendo el KV
+				log.Printf("[%s]	Error leyendo KV local para key %s: %v. Reintentando...", *nodeID, op.Key, err)
+				m.Nak() // Pide al servidor que reenvíe el mensaje
+				return
 		}
 
 		if doUpdate {
-			log.Printf("--> APLICANDO CAMBIO REMOTO (Gana remoto): %s = %s", op.Key, string(op.Value))
-			
+			log.Printf("[%s]	APLICANDO (Gana remoto): %s = %s", *nodeID, op.Key, string(op.Value))
+
 			switch op.Op {
 				case "put":
 					kv.Put(op.Key, op.Value)
 				case "del":
 					kv.Delete(op.Key)
 			}
-		} else {
-			log.Printf("--- IGNORANDO CAMBIO REMOTO (Gana local o es antiguo)")
 		}
 
 		m.Ack() // Confirmar recepción de mensaje después de procesarla
 	}, nats.Durable(*nodeID), nats.ManualAck())
 
 	if err != nil {
-		log.Fatalf("Erro al suscribirse al tópico de replicación: %v", err)
+		log.Fatalf("[%s] Erro al suscribirse al tópico de replicación: %v", *nodeID, err)
 	}
 
 	// =========================================================================
@@ -135,7 +155,7 @@ func main() {
 			nc.Publish(repSubject, data)
 
 			// Solo imprimir logs para depuración visual
-			fmt.Printf(">> Cambio Local detectado: %s. Publicado a %s\n", op.Key, repSubject)
+			fmt.Printf("[%s] Cambio Local detectado: %s. Publicado a %s\n", *nodeID, op.Key, repSubject)
 		}
 	}()
 

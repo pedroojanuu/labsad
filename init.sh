@@ -16,5 +16,3 @@ nats --server localhost:3222 stream add KV_REPLICATION \
   --discard old \
   --replicas 1 \
   --defaults
-
-# --storage file permite que los mensajes del stream persistan tras reiniciar el contendedor (ver volúmenes de nats-hub en docker-compose.yaml)

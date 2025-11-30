@@ -3,8 +3,7 @@ services:
     image: nats:latest
     command: ["-c", "/etc/nats/nats-hub.conf"]
     volumes:
-      - ./config/nats-hub.conf:/etc/nats/nats-hub.conf
-      - ./nats-data:/data   # para que los mensajes en el stream persistan
+      - ./nats-config/nats-hub.conf:/etc/nats/nats-hub.conf
     ports:
       - "3222:4222"
 
@@ -14,7 +13,7 @@ services:
     ports:
       - "4222:4222"
     volumes:
-      - ./config/nats-a.conf:/etc/nats/nats-a.conf
+      - ./nats-config/nats-a.conf:/etc/nats/nats-a.conf
     depends_on:
       - nats-hub
 
@@ -24,6 +23,6 @@ services:
     ports:
       - "5222:4222"
     volumes:
-      - ./config/nats-b.conf:/etc/nats/nats-b.conf
+      - ./nats-config/nats-b.conf:/etc/nats/nats-b.conf
     depends_on:
       - nats-hub
