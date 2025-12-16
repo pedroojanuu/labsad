@@ -26,6 +26,7 @@ type StoredCRDT struct {
 	Value  string `json:"value"`   // El valor de configuración real
 	Ts     int64  `json:"ts"`      // Contador Lógico persistente
 	NodeID string `json:"node_id"` // ID del nodo que realizó el último cambio
+	Deleted bool   `json:"deleted,omitempty"` //Flag para Tombstone
 }
 
 func main() {
@@ -114,78 +115,54 @@ func main() {
 				err = nats.ErrKeyNotFound // Se fuerza el flujo de 'key not found'
 			}
 		}
+		// Manejo de KeyNotFound
 		doUpdate := false
-		switch err {
-		case nats.ErrKeyNotFound:
-			if op.Op != "del" {
-				// Si no existe localmente y la operación no es DELETE, se aplica el remoto directamente - no hay conflicto
+		// Manejo de KeyNotFound
+		if err == nats.ErrKeyNotFound {
+			// Si no tengo el dato, SIEMPRE aplico lo que venga (sea Put o Del/Tombstone)
+			doUpdate = true
+		} else {
+			// CRDT LWW: Resolución de conflictos
+			// Gana si (Remoto.Ts > Local.Ts) O (Empate de tiempo y ID remoto es mayor)
+			if op.Ts > localStored.Ts || (op.Ts == localStored.Ts && op.NodeID > localStored.NodeID) {
 				doUpdate = true
 			} else {
-				log.Printf("[%s]	IGNORANDO (Operación DELETE sobre valor que ya no existe en KV local)", *nodeID)
+				// [LOG AÑADIDO]: Aquí verás si un ataque zombie es rechazado
+				log.Printf("[%s] IGNORANDO (Gana local - Ts Local:%d vs Remoto:%d)", *nodeID, localStored.Ts, op.Ts)
 			}
-		case nil:
-			// Si existe, se verifica si es el mismo valor para romper bucles de replicación
-			if localStored.Value == op.Value && localStored.Ts == op.Ts && localStored.NodeID == op.NodeID {
-				log.Printf("[%s]	IGNORANDO (Mismo valor y metadatos - Eco/Repetición): %s", *nodeID, op.Key)
-			} else {
-				// Si el valor es diferente, se aplica LWW:
-				// Gana si: (ts_remoto > ts_local) OR (ts_remoto == ts_local AND node_id_remoto > node_id_local)
-				localTs := localStored.Ts
-				localNodeID := localStored.NodeID
-
-				if op.Ts > localTs || (op.Ts == localTs && op.NodeID > localNodeID) {
-					doUpdate = true
-				} else {
-					log.Printf("[%s]	IGNORANDO (Gana local - Ts %d vs %d, Node %s vs %s)", *nodeID, localTs, op.Ts, localNodeID, op.NodeID)
-				}
-			}
-		default:
-			// Error inesperado leyendo el KV
-			log.Printf("[%s]	Error leyendo KV local para key %s: %v. Reintentando...", *nodeID, op.Key, err)
-			m.Nak() // Pide al servidor que reenvíe el mensaje
-			return
 		}
 
 		if doUpdate {
-			log.Printf("[%s]	APLICANDO (Gana remoto): %s = %s", *nodeID, op.Key, string(op.Value))
-
-			// Lógica de avance del reloj lógico: Si el remoto Ts es mayor que mi contador local
+			// Avanzar reloj lógico si el remoto es más futuro
 			if op.Ts > localCounter {
 				localCounter = op.Ts
-				counterValue := []byte(fmt.Sprintf("%d", localCounter))
-
-				// Persistir el nuevo valor del contador lógico en el KV de metadatos
-				if _, err := metaKv.Put(counterKey, counterValue); err != nil {
-					log.Printf("[%s] ERROR al persistir el contador actualizado: %v", *nodeID, err)
-				} else {
-					log.Printf("[%s] Reloj lógico avanzado a %d (basado en remoto).", *nodeID, localCounter)
-				}
+				metaKv.Put(counterKey, []byte(fmt.Sprintf("%d", localCounter)))
 			}
 
-			switch op.Op {
-			case "put":
-				newStored := StoredCRDT{
-					Value:  op.Value,
-					Ts:     op.Ts,
-					NodeID: op.NodeID,
-				}
-				data, _ := json.Marshal(newStored)
-
-				if _, err := kv.Put(op.Key, data); err != nil {
-					log.Printf("[%s] ERROR: Falló al guardar KV en Suscriptor (remoto): %v", *nodeID, err)
-				}
-
-			case "del":
-				kv.Delete(op.Key)
+			// Lógica unificada. Ya no usamos kv.Delete, siempre kv.Put
+			newStored := StoredCRDT{
+				
+				Ts:      op.Ts,
+				NodeID:  op.NodeID,
+				
 			}
+
+			if op.Op == "del" {
+				newStored.Deleted = true // Marcamos como Tombstone
+				newStored.Value = ""     // Limpiamos valor para ahorrar espacio
+				log.Printf("[%s] APLICANDO TOMBSTONE (Remoto): %s", *nodeID, op.Key)
+			} else {
+				newStored.Deleted = false
+				newStored.Value = op.Value
+				log.Printf("[%s] APLICANDO PUT (Remoto): %s", *nodeID, op.Key)
+			}
+			
+			bytes, _ := json.Marshal(newStored)
+			kv.Put(op.Key, bytes) // Guardamos (sea valor o lápida)
+			log.Printf("[%s] APLICADO %s (Gana remoto)", *nodeID, op.Op)
 		}
-
-		m.Ack() // Confirmar recepción de mensaje después de procesarla
+		m.Ack()
 	}, nats.Durable(*nodeID), nats.ManualAck())
-
-	if err != nil {
-		log.Fatalf("[%s] Error al suscribirse al tópico de replicación: %v", *nodeID, err)
-	}
 
 	// =========================================================================
 	// PARTE 2: VIGILAR CAMBIOS LOCALES (WATCH)
@@ -198,22 +175,23 @@ func main() {
 			}
 
 			// DETECCIÓN DE ECO
+			// Si es un PUT, miramos si es un formato interno nuestro
 			if update.Operation() == nats.KeyValuePut {
 				var stored StoredCRDT
 				if json.Unmarshal(update.Value(), &stored) == nil {
-					// Si es un JSON CRDT válido, ignorar la replicación para evitar bucles.
-					continue
+					// Si tiene flag Deleted true, es un tombstone que acabamos de escribir nosotros -> IGNORAR
+					if stored.Deleted {
+						continue
+					}
+					// Si tiene metadatos completos y valor, es un parche local -> IGNORAR
+					if stored.Ts > 0 && stored.NodeID != "" {
+						continue
+					}
 				}
 			}
 
 			localCounter++ // Incrementar el contador lógico local
-			counterValue := []byte(fmt.Sprintf("%d", localCounter))
-
-			// Persistir el nuevo valor del contador lógico en el KV de metadatos
-			if _, err := metaKv.Put(counterKey, counterValue); err != nil {
-				log.Printf("[%s] Error guardando contador lógico en KV meta: %v", *nodeID, err)
-				continue
-			}
+			metaKv.Put(counterKey, []byte(fmt.Sprintf("%d", localCounter)))
 
 			// Crear operación CRDT
 			op := CRDTOp{
@@ -223,34 +201,32 @@ func main() {
 				NodeID: *nodeID,
 			}
 
-			if update.Operation() == nats.KeyValuePut {
-				op.Op = "put"
-			} else {
+			//Lógica de intercepción de Borrados
+			if update.Operation() == nats.KeyValueDelete || update.Operation() == nats.KeyValuePurge {
+				// El usuario hizo 'nats kv del'. 
+				// 1. Preparamos mensaje 'del' para la red
 				op.Op = "del"
-			}
+				
+				// 2.Resucitamos el dato localmente como Tombstone inmediatamente.
+				// Esto dispara el Watcher otra vez (como PUT), pero el filtro de arriba (stored.Deleted) lo frenará.
+				tombstone, _ := json.Marshal(StoredCRDT{
+					Ts: op.Ts, NodeID: op.NodeID, Deleted: true,
+				})
+				kv.Put(op.Key, tombstone) 
+				
+				log.Printf("[%s] Borrado físico detectado -> Convertido a Tombstone local", *nodeID)
 
-			if update.Operation() == nats.KeyValuePut {
-				// El valor para la publicación es el valor puro detectado (convertido a string).
-				op.Value = string(update.Value())
-
-				// Se crea la nueva estructura StoredCRDT con los metadatos de esta operación.
-				newStored := StoredCRDT{
-					Value:  op.Value, // El valor puro (e.g., "dark")
-					Ts:     op.Ts,
-					NodeID: op.NodeID,
-				}
-				storedJSON, _ := json.Marshal(newStored)
-
-				// Se escribe el JSON de StoredCRDT de vuelta al KV local (kv).
-				// Esto garantiza que la próxima lectura de KV obtenga el Ts y NodeID correctos.
-				if _, err := kv.Put(op.Key, storedJSON); err != nil {
-					log.Printf("[%s] ERROR al parchear KV local con metadatos: %v", *nodeID, err)
-					continue
-				}
 			} else {
-				// Para 'DELETE' no hay parcheo local, simplemente se publica la operación de borrado.
+				// Es un PUT normal del usuario
+				op.Op = "put"
+				op.Value = string(update.Value())
+				
+				// Parcheamos el dato local con sus metadatos
+				patch, _ := json.Marshal(StoredCRDT{
+					Value: op.Value, Ts: op.Ts, NodeID: op.NodeID, Deleted: false,
+				})
+				kv.Put(op.Key, patch)
 			}
-
 			// Serializar y publicar
 			data, _ := json.Marshal(op)
 			nc.Publish(repSubject, data)
