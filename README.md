@@ -19,7 +19,19 @@ Para ejecutar ambos agentes (el de _site-a_ y el de _site-b_):
 
 ## Lógica CRDT
 
-Lorem ipsum dolor sit amet.
+El sistema implementa una replicación basada en CRDTs de estado (_State-based CRDT_), específicamente utilizando la estrategia _LWW-Register_ (_Last-Writer-Wins_) para garantizar la convergencia eventual de los datos entre los nodos.
+
+Los pilares de la implementación son:
+
+- Reloj Lógico de Lamport: En lugar de depender de relojes físicos (propensos a _clock skew_), cada nodo mantiene un contador entero (```localCounter```). Este contador se incrementa con cada operación local y se actualiza al recibir operaciones remotas (```max(local, remoto) + 1```), asegurando una relación causal entre eventos.
+
+- Regla de Resolución de Conflictos: Al recibir una operación de replicación, el agente decide si aplicar el cambio o descartarlo comparando los metadatos de la operación entrante con los almacenados localmente. La actualización gana ("Last Writer Wins") si:
+
+    - Su _timestamp_ lógico (```Ts```) es mayor que el local.
+
+    - En caso de empate en el Ts, su identificador de nodo (```NodeID```) es mayor lexicográficamente (por ejemplo, _site-b_ gana a _site-a_).
+
+    - _Tombstones_ (Lápidas): Los borrados no eliminan físicamente el registro del KV inmediatamente. En su lugar, se realiza una operación de actualización (```PUT```) marcando una bandera ```deleted: true```. Esto permite que la "intención de borrado" viaje por la red con su propio _timestamp_ y persista para ganar sobre mensajes antiguos (_zombies_) que pudieran llegar desordenados.
 
 ## Almacenamiento de metadados
 
