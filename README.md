@@ -29,7 +29,7 @@ Lorem ipsum dolor sit amet.
 
 La carpeta ```test``` contiene todos los _scripts_, que facilitan las pruebas, mencionados en esta sección.
 
-### Partición
+### 1. Partición
 
 Esta prueba simula un fallo crítico de red donde un nodo queda aislado mientras el otro sigue enviando actualizaciones. Queremos demostrar que el agente garantiza la consistencia.
 
@@ -58,8 +58,37 @@ El _script_ finaliza consultando ambos _buckets_. El resultado obtenido: ```{"va
 
 ![](images/particion.png)
 
-Lorem ipsum dolor sit amet.
+### 2. _Tombstone_
 
+Esta prueba verifica el ciclo de vida completo de un borrado lógico (_Tombstone_) y la robustez del protocolo CRDT frente a la llegada de mensajes desordenados.
+
+**El _script_ auxiliar se encuentra en ```test/test_tombstones.sh```.**
+
+#### Generación del Tombstone
+
+Al ejecutar la orden de borrado (```nats kv del```) en Site-A, el agente intercepta la operación. En lugar de permitir que el dato desaparezca, el agente inserta inmediatamente un registro JSON con la marca ```deleted: true``` y un ```timestamp``` actualizado. Esto asegura que el "borrado" viaje a Site-B como un dato persistente.
+
+#### Simulación de Ataque Zombie
+
+Con el dato ya borrado (_tombstone_ presente en ambos sitios), el _script_ inyecta artificialmente un mensaje antiguo en el bus de replicación con un _timestamp_ obsoleto (TS=1). Esto simula un paquete de red retrasado que intenta reescribir un dato que ya ha sido eliminado.
+
+#### Resolución de Conflictos y Protección
+
+El agente de Site-B recibe el mensaje zombie y compara los metadatos: TS remoto < TS local.
+
+Como el _timestamp_ del ataque es menor que el de la lápida actual, el agente aplica la regla LWW e ignora la operación.
+
+#### Resurrección y Verificación
+
+Finalmente, se realiza una escritura legítima ("resucitado") con un _timestamp_ actual.
+
+El _script_ verifica que esta nueva operación sí es aceptada, ya que su TS > TS tombstone.
+
+El resultado obtenido en Site-B es el JSON: ```{"value":"resucitado", "ts":..., "deleted": false}.```
+
+Esto confirma que el sistema permite recuperar claves borradas sin perder la consistencia frente a datos antiguos.
+
+![](images/tombstones.png)
 
 ---
 Alberto Olcina, Julen García y Pedro Januário
