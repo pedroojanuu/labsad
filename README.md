@@ -35,7 +35,21 @@ Los pilares de la implementación son:
 
 ## Almacenamiento de metadados
 
-Lorem ipsum dolor sit amet.
+Para que la lógica CRDT funcione sobre NATS KV, no almacenamos los valores en crudo (ej. "dark"), sino que encapsulamos cada dato en una estructura JSON rica que incluye los metadatos necesarios para la resolución de conflictos.
+
+Existen dos niveles de almacenamiento persistente en cada nodo:
+
+1. _Bucket_ Principal (```config```): Cada clave almacena un objeto JSON serializado (```StoredCRDT```) con la siguiente estructura, la cual permite que cada clave tenga su propio "tiempo lógico" independiente asociado. Si la bandera ```deleted``` es ```true```, la aplicación interpreta que la clave no existe, aunque físicamente ocupe espacio en el KV:
+
+```json
+{
+  "value": "contenido_real",
+  "ts": 12345,
+  "node_id": "site-a",
+  "deleted": false
+}
+```
+2. _Bucket_ de Metadatos (```config_meta```): Se utiliza un _bucket_ auxiliar para persistir el estado global del agente. Específicamente, se guarda la clave ```logical_clock```, que almacena el último valor del contador de Lamport. Esto permite que, si el agente se reinicia, pueda recuperar su "tiempo" y no empezar desde cero, evitando que sus nuevas operaciones sean descartadas erróneamente como antiguas por otros nodos.
 
 ## Pruebas
 
