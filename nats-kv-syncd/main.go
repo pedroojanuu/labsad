@@ -17,16 +17,16 @@ type CRDTOp struct {
 	Bucket string `json:"bucket"`
 	Key    string `json:"key"`
 	Value  string `json:"value"`
-	Ts     int64  `json:"ts"`      // Timestamp unix
+	Ts     int64  `json:"ts"`      // Reloj lógico
 	NodeID string `json:"node_id"` // Identificador del nodo (site-a, site-b)
 }
 
 // Estructura de metadatos que se almacena en el KV local
 type StoredCRDT struct {
-	Value  string `json:"value"`   // El valor de configuración real
-	Ts     int64  `json:"ts"`      // Contador Lógico persistente
-	NodeID string `json:"node_id"` // ID del nodo que realizó el último cambio
-	Deleted bool   `json:"deleted,omitempty"` //Flag para Tombstone
+	Value   string `json:"value"`             // El valor de configuración real
+	Ts      int64  `json:"ts"`                // Contador Lógico persistente
+	NodeID  string `json:"node_id"`           // ID del nodo que realizó el último cambio
+	Deleted bool   `json:"deleted,omitempty"` // Flag para Tombstone
 }
 
 func main() {
@@ -141,10 +141,9 @@ func main() {
 
 			// Lógica unificada. Ya no usamos kv.Delete, siempre kv.Put
 			newStored := StoredCRDT{
-				
-				Ts:      op.Ts,
-				NodeID:  op.NodeID,
-				
+
+				Ts:     op.Ts,
+				NodeID: op.NodeID,
 			}
 
 			if op.Op == "del" {
@@ -156,7 +155,7 @@ func main() {
 				newStored.Value = op.Value
 				log.Printf("[%s] APLICANDO PUT (Remoto): %s", *nodeID, op.Key)
 			}
-			
+
 			bytes, _ := json.Marshal(newStored)
 			kv.Put(op.Key, bytes) // Guardamos (sea valor o lápida)
 			log.Printf("[%s] APLICADO %s (Gana remoto)", *nodeID, op.Op)
@@ -203,24 +202,24 @@ func main() {
 
 			//Lógica de intercepción de Borrados
 			if update.Operation() == nats.KeyValueDelete || update.Operation() == nats.KeyValuePurge {
-				// El usuario hizo 'nats kv del'. 
+				// El usuario hizo 'nats kv del'.
 				// 1. Preparamos mensaje 'del' para la red
 				op.Op = "del"
-				
+
 				// 2.Resucitamos el dato localmente como Tombstone inmediatamente.
 				// Esto dispara el Watcher otra vez (como PUT), pero el filtro de arriba (stored.Deleted) lo frenará.
 				tombstone, _ := json.Marshal(StoredCRDT{
 					Ts: op.Ts, NodeID: op.NodeID, Deleted: true,
 				})
-				kv.Put(op.Key, tombstone) 
-				
+				kv.Put(op.Key, tombstone)
+
 				log.Printf("[%s] Borrado físico detectado -> Convertido a Tombstone local", *nodeID)
 
 			} else {
 				// Es un PUT normal del usuario
 				op.Op = "put"
 				op.Value = string(update.Value())
-				
+
 				// Parcheamos el dato local con sus metadatos
 				patch, _ := json.Marshal(StoredCRDT{
 					Value: op.Value, Ts: op.Ts, NodeID: op.NodeID, Deleted: false,
