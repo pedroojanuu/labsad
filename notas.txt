@@ -1,5 +1,0 @@
-Para implementar el tópico de replicación, se utiliza un tercer servidor (nats-hub) y nats-a y nats-b actúan como sus hojas (en cuanto al tópico de replicación, manteniendo sus propios almacenamientos KV locales).
-
-9. Actualizaciones perdidas y recuperación: se elige la estrategia 9.1 (convertir rep.kv.ops en un stream persistente)
-
-Al procesar un cambio recibido, cada agente solo actualiza su base de datos local si el valor recibido es diferente de lo que ya posee (además de las otras condiciones del CRDT). Si no, al hacer el cambio local, haria saltar el watcher de cambios locales que, a su vez, enviaría ese cambio al tópico de replicación, creando un bucle. En el caso de que la operación recibida es un DELETE, verifica si ya ha borrado el dato involucrado, ya que no hay comparación posible.
