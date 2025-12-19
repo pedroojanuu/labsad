@@ -23,10 +23,10 @@ type CRDTOp struct {
 
 // Estructura de metadatos que se almacena en el KV local
 type StoredCRDT struct {
-	Value   string `json:"value"`             // El valor de configuración real
-	Ts      int64  `json:"ts"`                // Contador Lógico persistente
-	NodeID  string `json:"node_id"`           // ID del nodo que realizó el último cambio
-	Deleted bool   `json:"deleted,omitempty"` // Flag para Tombstone
+	Value   string `json:"value"`   // El valor de configuración real
+	Ts      int64  `json:"ts"`      // Contador Lógico persistente
+	NodeID  string `json:"node_id"` // ID del nodo que realizó el último cambio
+	Deleted bool   `json:"deleted"` //Flag para Tombstone
 }
 
 func main() {
