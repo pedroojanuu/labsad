@@ -55,7 +55,15 @@ Existen dos niveles de almacenamiento persistente en cada nodo:
 
 La carpeta ```test``` contiene todos los _scripts_, que facilitan las pruebas, mencionados en esta sección.
 
-### 1. Partición
+### 1. General
+
+Muestra general del funcionamiento del agente de sincronización.
+
+**El _script_ auxiliar se encuentra en ```test/test_general.sh```.**
+
+Con el entorno de ejecución configurado como se describió en el primer apartado del documento &mdash;con dos agentes de sincronización, un por nodo, siendo ejecutados en ventanas distintas&mdash;, en una otra ventana, al ejecutar el _script_ mencionado, que desencadenará una serie de escrituras en los almacenes KV, se puede observar la lógica de convergencia mediante CRDT desde el punto de vista de cada agente.
+
+### 2. Partición
 
 Esta prueba simula un fallo crítico de red donde un nodo queda aislado mientras el otro sigue enviando actualizaciones. Queremos demostrar que el agente garantiza la consistencia.
 
@@ -84,7 +92,7 @@ El _script_ finaliza consultando ambos _buckets_. El resultado obtenido: ```{"va
 
 ![](images/particion.png)
 
-### 2. _Tombstone_
+### 3. _Tombstone_
 
 Esta prueba verifica el ciclo de vida completo de un borrado lógico (_Tombstone_) y la robustez del protocolo CRDT frente a la llegada de mensajes desordenados.
 

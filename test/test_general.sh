@@ -1,6 +1,6 @@
 #!/bin/bash
 
-echo "Script test2 iniciado"
+echo "Script iniciado"
 echo "Obsérvese la lógica de los CRDTs en las ventanas de los agentes"
 sleep 5
 
